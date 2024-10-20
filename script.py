@@ -1,6 +1,8 @@
 import paho.mqtt.client as mqtt
 import serial
+import time
 from settings import *
+import json
 STAND_LIGHTS_TOPIC_COMMANDS = {
     STAND_LIGHT1_COMMAND_TOPIC: [5, 1, 1],
     STAND_LIGHT2_COMMAND_TOPIC: [5, 1, 2],
@@ -16,7 +18,13 @@ LIGHTS_TOPIC_COMMANDS = {
     LIGHT6_COMMAND_TOPIC: [126, 1, 32]
 }
 
+WIFI_TOPIC_COMMANDS = {
+    WIFI1_COMMAND_TOPIC, WIFI2_COMMAND_TOPIC, WIFI3_COMMAND_TOPIC
+}
+
+
 general_mode = 0
+wifi_poles = []
 ser = serial.Serial(port=SERIAL_PORT, baudrate=BAUDRATE, timeout=0)  # test different timeouts
 
 def initial_setup():
@@ -28,6 +36,9 @@ def on_connect(client, userdata, flags, reason_code):
         client.subscribe(topic)
     for topic in LIGHTS_TOPIC_COMMANDS.keys():
         client.subscribe(topic)
+    for topic in WIFI_TOPIC_COMMANDS:
+        client.subscribe(topic)
+    client.subscribe(WNodes_Subscribe)
     client.subscribe(MODE_COMMAND_TOPIC)
     client.subscribe(FAN_COMMAND_TOPIC)
     client.subscribe(TEMP_COMMAND_TOPIC)
@@ -50,6 +61,11 @@ def on_message(client, userdata, msg):
         command = light_commands.get(msg.payload.decode())
         if command:
             send_can_message(command)
+    elif msg.topic == WNodes_Subscribe:
+        msg_dict = json.loads(msg.payload.decode())
+        update_wnode_dashboard(client, msg_dict)
+    elif msg.topic in WIFI_TOPIC_COMMANDS:
+        send_wifi_message(client, msg)
     elif msg.topic == MODE_COMMAND_TOPIC:
         mode = msg.payload.decode()
         set_mode(client, mode)
@@ -60,9 +76,37 @@ def on_message(client, userdata, msg):
         temp = int(msg.payload.decode())
         set_temperature(client, temp)
 
+def update_wnode_dashboard(client, msg):
+    global wifi_poles
+    wifi_poles = msg.get("poles")
+    for index, status in enumerate(msg.get("poles"), start=1):
+        update_light_status(index, status)
+
+def update_light_status(light_number, status):
+    if status == 1:
+        client.publish(f"WNode/Light{light_number}/status", "1")
+    else:
+        client.publish(f"WNode/Light{light_number}/status", "0")
+
+
+def send_wifi_message(client, msg):
+    global wifi_poles
+    if "Light1" in msg.topic:
+        wifi_poles[0] = int(msg.payload.decode())
+        curr_payload = {"poles":wifi_poles}
+        client.publish(WNodes_Publish, json.dumps(curr_payload))
+    elif "Light2" in msg.topic:
+        wifi_poles[1] = int(msg.payload.decode())
+        curr_payload = {"poles":wifi_poles}
+        client.publish(WNodes_Publish, json.dumps(curr_payload))
+    elif "Light3" in msg.topic:
+        wifi_poles[2] = int(msg.payload.decode())
+        curr_payload = {"poles":wifi_poles}
+        client.publish(WNodes_Publish, json.dumps(curr_payload))
 
 def set_mode(client, mode):
     print(f"Setting mode to {mode}")
+    command = None
     if mode == "heat":
         command = [125, 7, 2]
     elif mode == "cool":
@@ -73,6 +117,8 @@ def set_mode(client, mode):
 
 def set_fan_mode(client, fan_mode):
     print(f"Setting fan mode to {fan_mode}")
+    command = None
+
     if fan_mode == "high":
         if (general_mode & 32) >> 5 == 1:
             command = [125, 0, general_mode - 32 + 3 - (general_mode & 3)]
@@ -158,6 +204,8 @@ def publish_status(client):
 
 def publish_hvac_state(client, received_data):
     hvac_bytes = received_data[3]
+    mode = None
+    fan_mode = None
     if received_data[2] == 0:   # register 0
         if (hvac_bytes & 32) >> 5 == 1:
             fan_mode = "auto"
